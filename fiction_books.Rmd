@@ -1,0 +1,229 @@
+---
+title: "NYT Books"
+output: html_notebook
+---
+Investigating the settings of novels from NYT bestseller list
+
+
+Looks like I should load jsonlite package.
+```{r}
+library(jsonlite)
+library(lubridate)
+library(dplyr)
+library(tidytext)
+library(wordcloud)
+library(ggplot2)
+library(tidyverse)
+```
+
+Key
+```{r}
+api_key <- "api-key=79b2c775640b403daf3f8ff603ac8d94"
+
+```
+
+So, I can acccess the API through a browser or use the R package.
+
+Below, storing the string values for the url which I can then paste together
+```{r}
+base <- "http://api.nytimes.com/svc/books/v3/lists/"
+
+fic <- "/hardcover-fiction.json?"
+```
+
+So I wanna get all the books for the last few years. Going to loop through the dates, I suppose?
+
+Going to create a list with a bunch of dates (weekly, sundays) since June 2008.
+
+```{r}
+# July 13, 2008 was a Sunday.
+
+start_date <- as_date("2008-07-13")
+today <- as_date("2018-01-28")
+
+n_weeks <- (start_date - today)/7  # = 498. this is the number of weeks that have passed since July 13 2008. 
+
+dates <- c(start_date)
+
+for (i in 1:498){
+  new_week <- start_date + 7*i
+  dates <- c(dates, new_week)
+}
+
+date_chars <- as.character(dates)
+```
+
+Now that I have a list of dates, going to loop through it and pull the bestseller list for that date.
+Writing a function to get the fiction books for a given date.
+
+Going to try adding trycatch() to handle errors in the loop
+
+```{r}
+get_books <- function(date_string){
+  fromJSON(paste0(base, date_string, fic, api_key))
+}
+
+```
+
+Now going to apply it. I added Sys.sleep to my function so that i could use apply.
+
+Getting 504 error when having Sys.sleep(2).
+
+Even 504 error when Sys.sleep(20)
+
+The dataframes are embedded in the list under $books
+```{r}
+# nf_books <- try(sapply(date_chars[1:498], get_nf_books))
+
+all_weeks <- c()
+for (i in 1:length(date_chars)){
+ new_week <- try(get_books(date_chars[i])$results)
+ all_weeks <- c(all_weeks, new_week)
+ print(paste0("getting week", date_chars[i]))
+ Sys.sleep(3)
+}
+
+# here, making an index for everywhere books appear
+book_index <- c()
+for (i in 1:length(all_weeks)){
+  book_index <- c(book_index, (ifelse(names(all_weeks[i]) == "books",
+         i,
+         NA)))
+}
+
+# taking out the NAs
+book_index <- na.omit(book_index)
+
+# making the data frame to iterate on the first of the book dfs
+book_df <- all_weeks[11]$books
+
+# getting all the book dfs and binding them together
+for (i in book_index[2:length(book_index)]){
+  book_df <- rbind(book_df, all_weeks[i]$books)
+}
+
+# only pull info we want
+book_df <- book_df %>% 
+  select(title, publisher, description, author, price)
+
+# write a csv of the books
+write_csv(book_df, "fiction_book_df.csv")
+```
+
+
+Modifying stop words to keep "new"
+```{r}
+stop_words <- stop_words %>%
+  filter(word != "new")
+```
+
+
+```{r}
+# titles with most weeks
+book_df %>% 
+  group_by(title) %>% 
+  summarise(n = n(), price = mean(price)) %>% 
+  arrange(-n)
+
+# publishers with most weeks
+book_df %>% 
+  group_by(publisher) %>% 
+  summarise(n = n(), price = mean(price)) %>% 
+  arrange(-n)
+
+# authors with most weeks
+book_df %>% 
+  group_by(author) %>% 
+  summarise(n = n(), price = mean(price)) %>% 
+  arrange(-n)
+
+# tokenizing!
+
+tkn_titles <- book_df %>% 
+  unnest_tokens(word, title)
+
+title_bigrams <- book_df %>% 
+  unnest_tokens(bigram, title, token = "ngrams", n = 2)
+
+book_df %>% 
+  unnest_tokens(bigram, description, token = "ngrams", n = 2)
+
+# unique bigrams
+title_bigrams %>% 
+  group_by(bigram) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n)
+
+
+tkn_desc <- book_df %>% 
+  unnest_tokens(word, description)
+
+desc_bigrams %>% 
+  group_by(bigram) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n)
+
+
+tkn_desc %>% 
+  anti_join(stop_words) %>% 
+  count(word, sort=T)
+```
+
+Making some word clouds.
+
+```{r}
+title_word_freqs <- tkn_titles %>% 
+  select(word) %>% 
+  anti_join(stop_words) %>% 
+  unique() %>% 
+  group_by(word) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n)  
+
+  
+# most common titles in books
+wordcloud(words = title_word_freqs$word,
+            freq = title_word_freqs$n,
+            min.freq = 4,
+            random.order = FALSE,
+            max.words = 200,
+            colors=brewer.pal(8, "Dark2"))
+```
+
+Analysis of descriptions
+
+
+```{r}
+# most common words in descriptions
+words <- book_df %>% 
+  select(title, description) %>% 
+  distinct() %>% 
+  unnest_tokens(word, description) %>% 
+  anti_join(stop_words) %>% 
+  group_by(word) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n)
+
+
+# most common bigrams in descriptions
+bigrams <- book_df %>% 
+  select(title, description) %>% 
+  distinct() %>% 
+  unnest_tokens(bigram, description, "ngrams", n = 2) %>% 
+  separate(bigram, c("word1", "word2"), sep = " ") %>% 
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>% 
+  mutate(bigram = paste0(word1, " ", word2)) %>% 
+  group_by(bigram) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n)
+
+total_list <- words %>% 
+  rename(bigram = word) %>% 
+  rbind(bigrams) %>% 
+  arrange(-n)
+
+total_list %>% 
+  write_csv("book_cities.csv")
+```
+
